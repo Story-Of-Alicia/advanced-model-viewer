@@ -2,6 +2,9 @@ import { BASE, ABIN_DIR, canvas, renderer, scene, camera, controls, clock, state
 import { loadCharacter, buildSlotUI, clearScene, hasActiveAnimationPose, syncBoneLinks, syncAttachmentGroup, syncAttachmentGroupPosition } from './characterViewer.js';
 import { loadMap, clearMap } from './mapViewer.js';
 import { initAssetTree, clearAssetPreview, bumpSelectionToken, initSearch } from './assetBrowser.js';
+import { PakConnection } from './pakConnection.js';
+import { initPakTree, setPakConnection } from './pakBrowser.js';
+import { setPakTextureSource, clearPakTextureSource } from './textureUtils.js';
 
 // ─── Tab / mode switching ─────────────────────────────────────────────────────
 function setMode(mode) {
@@ -98,6 +101,52 @@ ui.btnWire.addEventListener('click', () => {
 });
 
 initSearch();
+
+// ─── PAK connection ───────────────────────────────────────────────────────────
+const btnBrowsePak    = document.getElementById('btn-browse-pak');
+const btnDisconnectPak = document.getElementById('btn-disconnect-pak');
+let pakConn = null;
+
+btnBrowsePak.addEventListener('click', async () => {
+  try {
+    setStatus('Connecting to PAK server...');
+    btnBrowsePak.disabled = true;
+
+    pakConn = new PakConnection();
+    await pakConn.connect();
+    setPakConnection(pakConn);
+
+    setStatus('Waiting for PAK file selection...');
+    const listing = await pakConn.openPak();
+
+    // Set up PAK texture source so DFF preview can resolve textures.
+    setPakTextureSource(listing.data, (path) => pakConn.fetchAsset(path));
+
+    // Build the PAK tree in the asset browser.
+    initPakTree(listing);
+
+    btnBrowsePak.style.display = 'none';
+    btnDisconnectPak.style.display = '';
+    setStatus(`PAK loaded: ${listing.data.length} assets`);
+  } catch (err) {
+    setStatus(`PAK error: ${err.message}`, true);
+    btnBrowsePak.disabled = false;
+    if (pakConn) { pakConn.disconnect(); pakConn = null; }
+  }
+});
+
+btnDisconnectPak.addEventListener('click', () => {
+  if (pakConn) { pakConn.disconnect(); pakConn = null; }
+  setPakConnection(null);
+  clearPakTextureSource();
+  clearAssetPreview();
+  bumpSelectionToken();
+  ui.assetTree.innerHTML = '';
+  btnBrowsePak.style.display = '';
+  btnBrowsePak.disabled = false;
+  btnDisconnectPak.style.display = 'none';
+  setStatus('Disconnected from PAK server');
+});
 
 // ─── Render loop ──────────────────────────────────────────────────────────────
 (function animate() {

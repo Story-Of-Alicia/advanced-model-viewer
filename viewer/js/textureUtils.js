@@ -1,5 +1,36 @@
 import * as THREE from 'three';
+import { DDSLoader } from 'three/addons/loaders/DDSLoader.js';
 import { BASE, ddsLoader, texCache, DEBUG_MAP_RESOLVE, DEBUG_MAP_RESOLVE_FILTER } from './viewerState.js';
+
+// ─── PAK texture index (populated when browsing a PAK file) ─────────────────
+// Maps lowercased texture name (without ext) -> full PAK path
+let pakTexIndex = new Map();
+let pakFetchAssetFn = null;
+
+export function setPakTextureSource(assetList, fetchFn) {
+  pakTexIndex.clear();
+  pakFetchAssetFn = fetchFn;
+  if (!assetList) return;
+  for (const entry of assetList) {
+    const originalPath = entry.path;               // original path with backslashes for server
+    const lower = originalPath.replace(/\\/g, '/').toLowerCase();
+    if (lower.endsWith('.dds') || lower.endsWith('.png')) {
+      // Index by filename without extension.
+      const filename = lower.split('/').pop();
+      const stem = filename.replace(/\.(dds|png)$/, '');
+      // Prefer DDS over PNG — only set if not already set or if this is DDS.
+      if (!pakTexIndex.has(stem) || lower.endsWith('.dds')) {
+        pakTexIndex.set(stem, originalPath);
+      }
+    }
+  }
+  console.log(`[PAK tex] indexed ${pakTexIndex.size} textures`);
+}
+
+export function clearPakTextureSource() {
+  pakTexIndex.clear();
+  pakFetchAssetFn = null;
+}
 
 // ─── BG file index (shared by textureUtils and mapViewer) ─────────────────────
 let bgIndexPromise = null;
@@ -47,6 +78,42 @@ export function getBgIndex() {
 
 export async function loadTexture(texDir, name, colorSpace = THREE.SRGBColorSpace) {
   if (!name) return null;
+
+  // pak mode: load texture from PAK via WebSocket
+  if (texDir === 'pak') {
+    if (!pakFetchAssetFn || !pakTexIndex.size) return null;
+    const coreName = name.replace(/_(dif|spc|sss)$/i, '');
+    const lowerName = name.toLowerCase();
+    const lowerCore = coreName.toLowerCase();
+    const pakPath = pakTexIndex.get(lowerName) ?? pakTexIndex.get(lowerCore);
+    if (!pakPath) return null;
+    const key = `pak:${pakPath}@${colorSpace}`;
+    if (!texCache.has(key)) {
+      texCache.set(key, (async () => {
+        const buffer = await pakFetchAssetFn(pakPath);
+        const ext = pakPath.toLowerCase().endsWith('.dds') ? '.dds' : '.png';
+        let tex;
+        if (ext === '.dds') {
+          const ddsData = new DDSLoader().parse(buffer);
+          tex = new THREE.CompressedTexture(
+            ddsData.mipmaps, ddsData.width, ddsData.height, ddsData.format
+          );
+          tex.needsUpdate = true;
+        } else {
+          const blob = new Blob([buffer], { type: 'image/png' });
+          const url = URL.createObjectURL(blob);
+          tex = await new Promise((ok, fail) =>
+            new THREE.TextureLoader().load(url, ok, undefined, fail)
+          );
+          URL.revokeObjectURL(url);
+        }
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.colorSpace = colorSpace;
+        return tex;
+      })().catch(() => null));
+    }
+    return texCache.get(key);
+  }
 
   // bg-index mode: look up the exact URL from the pre-built file index
   if (texDir === 'bg-index') {

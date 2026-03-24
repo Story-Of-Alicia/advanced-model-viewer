@@ -33,7 +33,7 @@ function clearChildren(el) {
   while (el.firstChild) el.removeChild(el.firstChild);
 }
 
-function selectAssetRow(row) {
+export function selectAssetRow(row) {
   if (activeAssetEl) activeAssetEl.classList.remove('active');
   activeAssetEl = row;
   if (row) row.classList.add('active');
@@ -92,18 +92,18 @@ function createCodeBlock(title, lines) {
   return createDetailBlock(title, [createTextElement('pre', 'asset-code', text)]);
 }
 
-function renderAssetDetail(blocks) {
+export function renderAssetDetail(blocks) {
   clearChildren(ui.assetDetail);
   blocks.filter(Boolean).forEach(block => ui.assetDetail.append(block));
   ui.assetDetail.scrollTop = 0;
 }
 
-function resetAssetDetail(message = 'Select a file or chunk to inspect it here.') {
+export function resetAssetDetail(message = 'Select a file or chunk to inspect it here.') {
   clearChildren(ui.assetDetail);
   ui.assetDetail.append(createTextElement('p', 'asset-empty', message));
 }
 
-function showAssetLoading(title, subtitle = '') {
+export function showAssetLoading(title, subtitle = '') {
   renderAssetDetail([
     createDetailBlock('Loading', [
       createTextElement('p', 'asset-empty', title),
@@ -112,7 +112,7 @@ function showAssetLoading(title, subtitle = '') {
   ]);
 }
 
-function showAssetError(title, message) {
+export function showAssetError(title, message) {
   renderAssetDetail([
     createDetailBlock('Error', [
       createTextElement('p', 'asset-empty', title),
@@ -220,7 +220,7 @@ function rwVerStr(ver) {
   return `  v${maj}.${min}`;
 }
 
-function parseRWChunks(dv, offset, end) {
+export function parseRWChunks(dv, offset, end) {
   const chunks = [];
   let pos = offset;
   while (pos + 12 <= end) {
@@ -309,7 +309,7 @@ function hexPreview(bytes, limit = 64) {
 
 // ─── Asset inspection ─────────────────────────────────────────────────────────
 
-function inspectAssetBuffer(buffer, path, filename, url) {
+export function inspectAssetBuffer(buffer, path, filename, url) {
   const ext = filename.split('.').pop().toLowerCase();
   const stem = filename.replace(/\.[^.]+$/, '');
   const bytes = new Uint8Array(buffer);
@@ -413,7 +413,7 @@ function inspectAssetBuffer(buffer, path, filename, url) {
   return info;
 }
 
-function buildFileDetailBlocks(info) {
+export function buildFileDetailBlocks(info) {
   const blocks = [];
 
   blocks.push(createKeyValueBlock('Overview', [
@@ -524,7 +524,7 @@ function showChunkDetails(path, filename, chunk, dv, depth) {
 
 // ─── Tree node helpers ────────────────────────────────────────────────────────
 
-function makeRow(cls, depth, toggle, iconText, labelText, labelTitle = '') {
+export function makeRow(cls, depth, toggle, iconText, labelText, labelTitle = '') {
   const row = document.createElement('div');
   row.className = cls;
   row.style.paddingLeft = `${6 + depth * 12}px`;
@@ -542,7 +542,7 @@ function makeRow(cls, depth, toggle, iconText, labelText, labelTitle = '') {
   return { row, tog, ico, lbl };
 }
 
-function makeExpandable(parent, headerRow, tog, ico, openIcon, closedIcon, loader, onSelect = null) {
+export function makeExpandable(parent, headerRow, tog, ico, openIcon, closedIcon, loader, onSelect = null) {
   const children = document.createElement('div');
   children.className = 'tree-children';
   let loaded = false;
@@ -624,7 +624,7 @@ function buildDirNodeAsset(parent, path, depth, autoExpand = false) {
   if (autoExpand) row.click();
 }
 
-function buildRWChunkNodeAsset(parent, dv, chunk, depth, context = { path: '', filename: '' }) {
+export function buildRWChunkNodeAsset(parent, dv, chunk, depth, context = { path: '', filename: '' }) {
   const sizeLabel = formatByteSize(chunk.size);
   const versionLabel = rwVerStr(chunk.version).trim();
   const label = `${rwChunkLabel(chunk.type)} - ${sizeLabel}${versionLabel ? ` ${versionLabel}` : ''}`;
@@ -793,7 +793,7 @@ async function loadRWChunkTreeAsset(parent, url, depth, context) {
 
 // ─── DFF preview ──────────────────────────────────────────────────────────────
 
-async function previewAssetInfo(info, token = assetSelectionToken) {
+export async function previewAssetInfo(info, token = assetSelectionToken) {
   const dffData = info?.parsed?.dffData;
   if (!dffData) return;
 
@@ -807,7 +807,8 @@ async function previewAssetInfo(info, token = assetSelectionToken) {
   for (const atomic of dffData.atomics) {
     if (atomic.renderFlags !== 0 && (atomic.renderFlags & 0x04) === 0) continue;
     const geometry = dffData.geometries[atomic.geometryIndex];
-    const mesh = await buildMesh(geometry, 'bg-index', [], dffData.frames ?? [], null, false, null);
+    const texDir = info.url?.startsWith('pak://') ? 'pak' : 'bg-index';
+    const mesh = await buildMesh(geometry, texDir, [], dffData.frames ?? [], null, false, null);
     if (mesh) group.add(mesh);
   }
 

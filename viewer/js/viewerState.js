@@ -88,6 +88,10 @@ export const state = {
   showWireframe:  false,
   userLight:      null,
   userLightViz:   null,
+  // PAK state
+  pakConnection:     null,    // PakConnection instance
+  pakAssetIndex:     null,    // Map<normalised path, original PAK path>
+  pakListing:        null,    // raw listing.data array from server
   // Map state
   mapMode:           false,
   mapGroup:          null,
@@ -169,7 +173,34 @@ export function updateUserLight() {
 }
 
 export async function fetchBinary(url) {
+  // If PAK is connected, try to resolve the asset from the PAK.
+  if (state.pakConnection?.connected && state.pakAssetIndex) {
+    let path = url;
+    // Strip the BASE prefix (e.g. "..") so we get a relative path like "graphics/pc/r00/r00.dff"
+    if (path.startsWith(BASE + '/')) path = path.substring(BASE.length + 1);
+    const normalised = path.replace(/\\/g, '/').toLowerCase();
+    const originalPath = state.pakAssetIndex.get(normalised);
+    if (originalPath) {
+      return state.pakConnection.fetchAsset(originalPath);
+    }
+  }
+  // Fall back to HTTP.
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.arrayBuffer();
+}
+
+// Build a PAK asset index from the listing data.
+export function buildPakAssetIndex(listingData) {
+  const index = new Map();
+  for (const entry of listingData) {
+    const normalised = entry.path.replace(/\\/g, '/').toLowerCase();
+    index.set(normalised, entry.path);
+  }
+  return index;
+}
+
+// Get the active texDir — returns 'pak' when PAK is connected, otherwise the given default.
+export function getTexDir(fallback) {
+  return state.pakConnection?.connected ? 'pak' : fallback;
 }

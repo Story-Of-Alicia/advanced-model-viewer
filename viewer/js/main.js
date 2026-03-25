@@ -1,10 +1,10 @@
-import { BASE, ABIN_DIR, canvas, renderer, scene, camera, controls, clock, state, ui, setStatus, initUserLight, updateUserLight } from './viewerState.js';
+import { BASE, ABIN_DIR, canvas, renderer, scene, camera, controls, clock, state, ui, setStatus, buildPakAssetIndex, initUserLight, updateUserLight } from './viewerState.js';
 import { loadCharacter, buildSlotUI, clearScene, hasActiveAnimationPose, syncBoneLinks, syncAttachmentGroup, syncAttachmentGroupPosition } from './characterViewer.js';
 import { loadMap, clearMap } from './mapViewer.js';
 import { initAssetTree, clearAssetPreview, bumpSelectionToken, initSearch } from './assetBrowser.js';
 import { PakConnection } from './pakConnection.js';
 import { initPakTree, setPakConnection } from './pakBrowser.js';
-import { setPakTextureSource, clearPakTextureSource } from './textureUtils.js';
+import { setPakTextureSource, clearPakTextureSource, resetBgIndex } from './textureUtils.js';
 
 // ─── Tab / mode switching ─────────────────────────────────────────────────────
 function setMode(mode) {
@@ -63,7 +63,7 @@ ui.timeline.addEventListener('input', () => {
 
 ui.tabChar.addEventListener('click',   () => { setMode('char');   clearMap(); switchChar(ui.charSelect.value); });
 ui.tabMap.addEventListener('click',    () => { setMode('map');    clearScene(); if (ui.mapSelect.value) loadMap(ui.mapSelect.value); });
-ui.tabAssets.addEventListener('click', () => { setMode('assets'); clearScene(); clearMap(); initAssetTree(); });
+ui.tabAssets.addEventListener('click', () => { setMode('assets'); clearScene(); clearMap(); if (!state.pakConnection) initAssetTree(); });
 
 ui.mapSelect.addEventListener('change', () => { if (ui.mapSelect.value) loadMap(ui.mapSelect.value); });
 
@@ -105,22 +105,46 @@ initSearch();
 // ─── PAK connection ───────────────────────────────────────────────────────────
 const btnBrowsePak    = document.getElementById('btn-browse-pak');
 const btnDisconnectPak = document.getElementById('btn-disconnect-pak');
-let pakConn = null;
+
+function populateMapSelectFromPak(listingData) {
+  ui.mapSelect.innerHTML = '';
+  const abinDirNorm = ABIN_DIR.replace(/\\/g, '/').toLowerCase();
+  const abinFiles = listingData
+    .map(e => e.path.replace(/\\/g, '/'))
+    .filter(p => p.toLowerCase().startsWith(abinDirNorm + '/') && p.toLowerCase().endsWith('.abin'))
+    .map(p => p.split('/').pop());
+  for (const f of abinFiles) {
+    const opt = document.createElement('option');
+    opt.value = f; opt.textContent = f.replace(/\.abin$/i, '');
+    ui.mapSelect.appendChild(opt);
+  }
+}
 
 btnBrowsePak.addEventListener('click', async () => {
   try {
     setStatus('Connecting to PAK server...');
     btnBrowsePak.disabled = true;
 
-    pakConn = new PakConnection();
+    const pakConn = new PakConnection();
     await pakConn.connect();
-    setPakConnection(pakConn);
 
     setStatus('Waiting for PAK file selection...');
     const listing = await pakConn.openPak();
 
-    // Set up PAK texture source so DFF preview can resolve textures.
+    // Set global PAK state so all viewers can use it.
+    state.pakConnection = pakConn;
+    state.pakListing    = listing.data;
+    state.pakAssetIndex = buildPakAssetIndex(listing.data);
+
+    // Set up PAK texture source for DFF/BSP texture resolution.
     setPakTextureSource(listing.data, (path) => pakConn.fetchAsset(path));
+    setPakConnection(pakConn);
+
+    // Reset bg-index so it rebuilds from PAK data.
+    resetBgIndex();
+
+    // Populate map select from PAK abin files.
+    populateMapSelectFromPak(listing.data);
 
     // Build the PAK tree in the asset browser.
     initPakTree(listing);
@@ -131,17 +155,25 @@ btnBrowsePak.addEventListener('click', async () => {
   } catch (err) {
     setStatus(`PAK error: ${err.message}`, true);
     btnBrowsePak.disabled = false;
-    if (pakConn) { pakConn.disconnect(); pakConn = null; }
+    if (state.pakConnection) { state.pakConnection.disconnect(); }
+    state.pakConnection = null;
+    state.pakAssetIndex = null;
+    state.pakListing = null;
   }
 });
 
 btnDisconnectPak.addEventListener('click', () => {
-  if (pakConn) { pakConn.disconnect(); pakConn = null; }
+  if (state.pakConnection) { state.pakConnection.disconnect(); }
+  state.pakConnection = null;
+  state.pakAssetIndex = null;
+  state.pakListing = null;
   setPakConnection(null);
   clearPakTextureSource();
+  resetBgIndex();
   clearAssetPreview();
   bumpSelectionToken();
   ui.assetTree.innerHTML = '';
+  ui.mapSelect.innerHTML = '';
   btnBrowsePak.style.display = '';
   btnBrowsePak.disabled = false;
   btnDisconnectPak.style.display = 'none';
@@ -200,8 +232,8 @@ btnDisconnectPak.addEventListener('click', () => {
       }
     } catch { /* no abin directory listing available */ }
 
-    setMode('char');
-    await switchChar('r00');
+    // Default to assets tab.
+    setMode('assets');
   } catch (e) {
     setStatus(`Init error: ${e.message}`, true);
     console.error(e);

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { DFFParser } from './DFFParser.js';
 import { BSPParser  } from './BSPParser.js';
-import { BASE, ABIN_DIR, scene, camera, controls, state, ui, setStatus, fetchBinary } from './viewerState.js';
+import { BASE, ABIN_DIR, scene, camera, controls, state, ui, setStatus, fetchBinary, getTexDir } from './viewerState.js';
 import { loadTexture, pushUniqueName, logMapResolveDebug, getBgIndex } from './textureUtils.js';
 import { ABinParser } from './ABinParser.js';
 
@@ -416,9 +416,10 @@ async function tryFetchDFF(name) {
   const key = name.toLowerCase();
   const url = dff.get(key) ?? dff.get(key + '_ao');
   if (!url) return null;
-  const res = await fetch(url);
-  if (!res.ok) return null;
-  return { url, buffer: await res.arrayBuffer() };
+  try {
+    const buffer = await fetchBinary(url);
+    return { url, buffer };
+  } catch { return null; }
 }
 
 async function tryFetchBSP(name) {
@@ -426,9 +427,10 @@ async function tryFetchBSP(name) {
   const key = name.toLowerCase();
   const url = bsp.get(key);
   if (!url) return null;
-  const res = await fetch(url);
-  if (!res.ok) return null;
-  return { url, buffer: await res.arrayBuffer() };
+  try {
+    const buffer = await fetchBinary(url);
+    return { url, buffer };
+  } catch { return null; }
 }
 
 // ─── Load map ─────────────────────────────────────────────────────────────────
@@ -494,7 +496,7 @@ export async function loadMap(abinFile) {
         let sceneObj;
         if (isMapTerrain && bspGeoData && bspTextures?.length) {
           console.log(`[BSP render] ${model.name}: ${bspGeoData.vertices.length/3} verts, ${bspGeoData.matGroups.size} groups, ${bspTextures.length} mats, uvSets=${bspGeoData.uvSets.length}`);
-          sceneObj = await buildBSPMesh(bspGeoData, bspTextures, 'bg-index', resolvedDebug.bspNames);
+          sceneObj = await buildBSPMesh(bspGeoData, bspTextures, getTexDir('bg-index'), resolvedDebug.bspNames);
           state.mapGroup.add(sceneObj);
           li.className = 'terrain';
         } else {
@@ -505,7 +507,7 @@ export async function loadMap(abinFile) {
           for (const atomic of dffData.atomics) {
             if (atomic.renderFlags !== 0 && (atomic.renderFlags & 0x04) === 0) continue;
             const geo  = dffData.geometries[atomic.geometryIndex];
-            const mesh = await buildMesh(geo, 'bg-index', [], dffData.frames ?? [], null, false, bspTextures, resolvedDebug.dffNames);
+            const mesh = await buildMesh(geo, getTexDir('bg-index'), [], dffData.frames ?? [], null, false, bspTextures, resolvedDebug.dffNames);
             if (!mesh) continue;
             group.add(mesh);
           }

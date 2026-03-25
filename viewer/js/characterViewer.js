@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { DFFParser } from './DFFParser.js';
 import { ANMParser } from './ANMParser.js';
-import { BASE, scene, camera, controls, state, ui, CHAR_CFG, setStatus, fetchBinary, initUserLight, updateUserLight } from './viewerState.js';
+import { BASE, scene, camera, controls, state, ui, CHAR_CFG, setStatus, fetchBinary, getTexDir, initUserLight, updateUserLight } from './viewerState.js';
 import { loadTexture, loadTextureSet, normalizeTextureStem, pushUniqueName } from './textureUtils.js';
 import { buildTerrainBlendMaterial } from './mapViewer.js';
 
@@ -491,7 +491,7 @@ async function loadSlot(slotId, meshName) {
   for (const atomic of dffData.atomics) {
     if (atomic.renderFlags !== 0 && (atomic.renderFlags & 0x04) === 0) continue;
     const geo  = dffData.geometries[atomic.geometryIndex];
-    const mesh = await buildMesh(geo, cfg.texDir, useBones, useFrames, useBoneInverses, attachLocalSkeleton);
+    const mesh = await buildMesh(geo, getTexDir(cfg.texDir), useBones, useFrames, useBoneInverses, attachLocalSkeleton);
     if (!mesh) continue;
     group.add(mesh);
     built++;
@@ -689,8 +689,20 @@ export function rebuildSkeletonHelper() {
 export async function populateAnimList(anmDir) {
   ui.animList.innerHTML = '';
   try {
-    const text  = await (await fetch(`${BASE}/${anmDir}/`)).text();
-    const files = [...text.matchAll(/href="([^"]+\.anm)"/gi)].map(m => m[1]);
+    let files;
+
+    if (state.pakListing) {
+      // Filter PAK listing for .anm files under the animation directory.
+      const anmDirNorm = anmDir.replace(/\\/g, '/').toLowerCase();
+      files = state.pakListing
+        .map(e => e.path.replace(/\\/g, '/'))
+        .filter(p => p.toLowerCase().startsWith(anmDirNorm + '/') && p.toLowerCase().endsWith('.anm'))
+        .map(p => p.split('/').pop());
+    } else {
+      const text = await (await fetch(`${BASE}/${anmDir}/`)).text();
+      files = [...text.matchAll(/href="([^"]+\.anm)"/gi)].map(m => m[1]);
+    }
+
     if (!files.length) { ui.animList.innerHTML = '<li class="empty">No animations</li>'; return; }
 
     for (const file of files) {

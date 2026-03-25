@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { DDSLoader } from 'three/addons/loaders/DDSLoader.js';
-import { BASE, ddsLoader, texCache, DEBUG_MAP_RESOLVE, DEBUG_MAP_RESOLVE_FILTER } from './viewerState.js';
+import { BASE, ddsLoader, texCache, state, DEBUG_MAP_RESOLVE, DEBUG_MAP_RESOLVE_FILTER } from './viewerState.js';
 
 // ─── PAK texture index (populated when browsing a PAK file) ─────────────────
 // Maps lowercased texture name (without ext) -> full PAK path
@@ -34,8 +34,45 @@ export function clearPakTextureSource() {
 
 // ─── BG file index (shared by textureUtils and mapViewer) ─────────────────────
 let bgIndexPromise = null;
+
+// Build the bg-index from PAK listing data (no HTTP scanning needed).
+function buildBgIndexFromPak(listingData) {
+  const dff = new Map();
+  const bsp = new Map();
+  const tex = new Map();
+  for (const entry of listingData) {
+    const path = entry.path.replace(/\\/g, '/');
+    const lower = path.toLowerCase();
+    const filename = lower.split('/').pop();
+    // Use the relative HTTP-style URL so tryFetchDFF/BSP can call fetchBinary on it.
+    const url = `${BASE}/${path}`;
+    if (filename.endsWith('.dff')) {
+      const stem = filename.slice(0, -4);
+      if (!dff.has(stem)) dff.set(stem, url);
+    } else if (filename.endsWith('.bsp')) {
+      const stem = filename.slice(0, -4);
+      if (!bsp.has(stem)) bsp.set(stem, url);
+    } else if (filename.endsWith('.dds') || filename.endsWith('.png')) {
+      if (!tex.has(filename)) tex.set(filename, url);
+      const stripped = filename.replace(/^[^a-z]+/, '');
+      if (stripped !== filename && !tex.has(stripped)) tex.set(stripped, url);
+    }
+  }
+  console.log(`[PAK BG index] ${dff.size} DFF, ${bsp.size} BSP, ${tex.size} textures`);
+  return { dff, bsp, tex };
+}
+
+export function resetBgIndex() {
+  bgIndexPromise = null;
+}
+
 export function getBgIndex() {
   if (!bgIndexPromise) bgIndexPromise = (async () => {
+    // If PAK is connected, build from listing instead of scanning HTTP directories.
+    if (state.pakListing) {
+      return buildBgIndexFromPak(state.pakListing);
+    }
+
     const dff = new Map();
     const bsp = new Map();
     const tex = new Map();

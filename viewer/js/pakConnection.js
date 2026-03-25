@@ -50,6 +50,23 @@ export class PakConnection {
     return this._sendJSON({ action: 'fetch', path }, true);
   }
 
+  // Ask the editor server to open a native file picker and add/replace
+  // an asset in the in-memory PAK.
+  // Returns a fresh listing payload: { action, path, data, message }.
+  addAssetFromFile(path, options = {}) {
+    const payload = { action: 'add_asset_from_file', path };
+    if (typeof options.isCompressed === 'boolean') {
+      payload.is_compressed = options.isCompressed;
+    }
+    return this._sendJSON(payload, false);
+  }
+
+  // Ask the editor server to export the currently loaded PAK to a new file.
+  // Returns: { action: "exported", path: "..." }.
+  exportPak() {
+    return this._sendJSON({ action: 'export' }, false);
+  }
+
   // ── Internal ──────────────────────────────────────────────────────────────
 
   _sendJSON(obj, wantBinary) {

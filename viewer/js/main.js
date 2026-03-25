@@ -105,6 +105,8 @@ initSearch();
 // ─── PAK connection ───────────────────────────────────────────────────────────
 const btnBrowsePak    = document.getElementById('btn-browse-pak');
 const btnDisconnectPak = document.getElementById('btn-disconnect-pak');
+const btnAddAssetPak = document.getElementById('btn-add-asset-pak');
+const btnExportPak = document.getElementById('btn-export-pak');
 
 function populateMapSelectFromPak(listingData) {
   ui.mapSelect.innerHTML = '';
@@ -120,6 +122,25 @@ function populateMapSelectFromPak(listingData) {
   }
 }
 
+function refreshPakStateFromListing(pakConn, listing) {
+  state.pakConnection = pakConn;
+  state.pakListing = listing.data;
+  state.pakAssetIndex = buildPakAssetIndex(listing.data);
+
+  // Set up PAK texture source for DFF/BSP texture resolution.
+  setPakTextureSource(listing.data, (path) => pakConn.fetchAsset(path));
+  setPakConnection(pakConn);
+
+  // Reset bg-index so it rebuilds from PAK data.
+  resetBgIndex();
+
+  // Populate map select from PAK abin files.
+  populateMapSelectFromPak(listing.data);
+
+  // Build the PAK tree in the asset browser.
+  initPakTree(listing);
+}
+
 btnBrowsePak.addEventListener('click', async () => {
   try {
     setStatus('Connecting to PAK server...');
@@ -131,26 +152,12 @@ btnBrowsePak.addEventListener('click', async () => {
     setStatus('Waiting for PAK file selection...');
     const listing = await pakConn.openPak();
 
-    // Set global PAK state so all viewers can use it.
-    state.pakConnection = pakConn;
-    state.pakListing    = listing.data;
-    state.pakAssetIndex = buildPakAssetIndex(listing.data);
-
-    // Set up PAK texture source for DFF/BSP texture resolution.
-    setPakTextureSource(listing.data, (path) => pakConn.fetchAsset(path));
-    setPakConnection(pakConn);
-
-    // Reset bg-index so it rebuilds from PAK data.
-    resetBgIndex();
-
-    // Populate map select from PAK abin files.
-    populateMapSelectFromPak(listing.data);
-
-    // Build the PAK tree in the asset browser.
-    initPakTree(listing);
+    refreshPakStateFromListing(pakConn, listing);
 
     btnBrowsePak.style.display = 'none';
     btnDisconnectPak.style.display = '';
+    btnAddAssetPak.style.display = '';
+    btnExportPak.style.display = '';
     setStatus(`PAK loaded: ${listing.data.length} assets`);
   } catch (err) {
     setStatus(`PAK error: ${err.message}`, true);
@@ -159,6 +166,64 @@ btnBrowsePak.addEventListener('click', async () => {
     state.pakConnection = null;
     state.pakAssetIndex = null;
     state.pakListing = null;
+    btnAddAssetPak.style.display = 'none';
+    btnExportPak.style.display = 'none';
+  }
+});
+
+btnAddAssetPak.addEventListener('click', async () => {
+  if (!state.pakConnection?.connected) {
+    setStatus('Connect to a PAK server first.', true);
+    return;
+  }
+
+  const pathInput = window.prompt(
+    'Target PAK asset path (example: graphics/pc/r00/new_asset.dff):',
+    'graphics/pc/'
+  );
+  if (pathInput == null) return;
+
+  const assetPath = pathInput.trim();
+  if (!assetPath) {
+    setStatus('Asset path cannot be empty.', true);
+    return;
+  }
+
+  const isCompressed = window.confirm(
+    'Compress the asset data in the output PAK?\n\nOK = compressed, Cancel = uncompressed'
+  );
+
+  try {
+    btnAddAssetPak.disabled = true;
+    setStatus('Select the source asset file in the editor dialog...');
+    const listing = await state.pakConnection.addAssetFromFile(assetPath, { isCompressed });
+    if (listing.debug) {
+      console.info('[PAK add debug]', listing.debug);
+    }
+    refreshPakStateFromListing(state.pakConnection, listing);
+    setStatus(listing.message ?? `Updated asset: ${assetPath}`);
+  } catch (err) {
+    setStatus(`PAK update error: ${err.message}`, true);
+  } finally {
+    btnAddAssetPak.disabled = false;
+  }
+});
+
+btnExportPak.addEventListener('click', async () => {
+  if (!state.pakConnection?.connected) {
+    setStatus('Connect to a PAK server first.', true);
+    return;
+  }
+
+  try {
+    btnExportPak.disabled = true;
+    setStatus('Choose where to export the modified PAK in the editor dialog...');
+    const result = await state.pakConnection.exportPak();
+    setStatus(`PAK exported: ${result.path}`);
+  } catch (err) {
+    setStatus(`PAK export error: ${err.message}`, true);
+  } finally {
+    btnExportPak.disabled = false;
   }
 });
 
@@ -177,6 +242,8 @@ btnDisconnectPak.addEventListener('click', () => {
   btnBrowsePak.style.display = '';
   btnBrowsePak.disabled = false;
   btnDisconnectPak.style.display = 'none';
+  btnAddAssetPak.style.display = 'none';
+  btnExportPak.style.display = 'none';
   setStatus('Disconnected from PAK server');
 });
 

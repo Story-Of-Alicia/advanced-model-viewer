@@ -1,4 +1,12 @@
-// ─── WebSocket client for alicia-editor PAK server ──────────────────────────
+// WebSocket client for the Alicia editor PAK protocol.
+// Protocol shape:
+// {
+//   "endpoint": "pak" | "asset",
+//   "payload": {
+//     "operation": "...",
+//     ...
+//   }
+// }
 
 const DEFAULT_URL = 'ws://localhost:8083';
 
@@ -6,8 +14,8 @@ export class PakConnection {
   constructor(url = DEFAULT_URL) {
     this.url = url;
     this.ws = null;
-    this._pending = [];     // queue of { resolve, reject, wantBinary }
-    this._binaryHeader = null; // stashed JSON header preceding a binary frame
+    this.resourcePath = '';
+    this._pending = [];
   }
 
   connect() {
@@ -16,13 +24,11 @@ export class PakConnection {
       this.ws.binaryType = 'arraybuffer';
 
       this.ws.onopen = () => resolve();
-      this.ws.onerror = (e) => reject(new Error('WebSocket connection failed'));
+      this.ws.onerror = () => reject(new Error('WebSocket connection failed'));
       this.ws.onclose = () => {
-        // Reject any pending requests.
         for (const p of this._pending) p.reject(new Error('Connection closed'));
         this._pending = [];
       };
-
       this.ws.onmessage = (event) => this._onMessage(event);
     });
   }
@@ -38,77 +44,126 @@ export class PakConnection {
     return this.ws?.readyState === WebSocket.OPEN;
   }
 
-  // Ask the server to open a PAK file (triggers native file dialog).
-  // Returns the asset listing: { action, path, data: [{path, size, ...}] }
-  openPak() {
-    return this._sendJSON({ action: 'read' }, false);
+  async openPak() {
+    const prompt = await this.promptPak();
+    const resourcePath = String(prompt?.resource_path ?? '').trim();
+    if (!resourcePath) throw new Error('No PAK path selected');
+    const listing = await this.readPak(resourcePath);
+    return { resource_path: resourcePath, assets: listing?.assets ?? [] };
   }
 
-  // Fetch a single asset's binary data by its PAK path.
-  // Returns an ArrayBuffer with the decompressed data.
-  fetchAsset(path) {
-    return this._sendJSON({ action: 'fetch', path }, true);
+  async promptPak() {
+    return this._sendRequest('pak', { operation: 'prompt' });
   }
 
-  // Ask the editor server to open a native file picker and add/replace
-  // an asset in the in-memory PAK.
-  // Returns a fresh listing payload: { action, path, data, message }.
-  addAssetFromFile(path, options = {}) {
-    const payload = { action: 'add_asset_from_file', path };
-    if (typeof options.isCompressed === 'boolean') {
-      payload.is_compressed = options.isCompressed;
-    }
-    return this._sendJSON(payload, false);
+  async readPak(resourcePath = this.resourcePath) {
+    const path = String(resourcePath ?? '').trim();
+    if (!path) throw new Error('PAK resource path is empty');
+    const response = await this._sendRequest('pak', {
+      operation: 'read',
+      resource_path: path,
+    });
+    this.resourcePath = path;
+    return { resource_path: path, assets: response?.assets ?? [] };
   }
 
-  // Ask the editor server to export the currently loaded PAK to a new file.
-  // Returns: { action: "exported", path: "..." }.
-  exportPak() {
-    return this._sendJSON({ action: 'export' }, false);
+  async writePak(resourcePath = this.resourcePath, targetResourcePath = '') {
+    const path = String(resourcePath ?? '').trim();
+    if (!path) throw new Error('PAK resource path is empty');
+    const payload = {
+      operation: 'write',
+      resource_path: path,
+    };
+    const targetPath = String(targetResourcePath ?? '').trim();
+    if (targetPath) payload.target_resource_path = targetPath;
+
+    const response = await this._sendRequest('pak', payload);
+    this.resourcePath = path;
+    return response ?? {};
   }
 
-  // ── Internal ──────────────────────────────────────────────────────────────
+  async invalidatePak(resourcePath = this.resourcePath) {
+    const path = String(resourcePath ?? '').trim();
+    if (!path) return {};
+    const response = await this._sendRequest('pak', {
+      operation: 'invalidate',
+      resource_path: path,
+    });
+    if (this.resourcePath === path) this.resourcePath = '';
+    return response ?? {};
+  }
 
-  _sendJSON(obj, wantBinary) {
+  async fetchAsset(assetPath, resourcePath = this.resourcePath) {
+    const path = String(assetPath ?? '').trim();
+    const resource = String(resourcePath ?? '').trim();
+    if (!resource) throw new Error('PAK resource path is empty');
+    if (!path) throw new Error('Asset path is empty');
+
+    const response = await this._sendRequest('asset', {
+      operation: 'read',
+      resource_path: resource,
+      asset_path: path,
+    });
+
+    const bytes = this._coerceByteArray(response?.data);
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  }
+
+  async writeAsset(assetPath, data, resourcePath = this.resourcePath) {
+    const path = String(assetPath ?? '').trim();
+    const resource = String(resourcePath ?? '').trim();
+    if (!resource) throw new Error('PAK resource path is empty');
+    if (!path) throw new Error('Asset path is empty');
+    const bytes = this._coerceByteArray(data);
+
+    return this._sendRequest('asset', {
+      operation: 'write',
+      resource_path: resource,
+      asset_path: path,
+      data: [...bytes],
+    });
+  }
+
+  _coerceByteArray(value) {
+    if (value instanceof Uint8Array) return value;
+    if (value instanceof ArrayBuffer) return new Uint8Array(value);
+    if (Array.isArray(value)) return Uint8Array.from(value);
+    throw new Error('Asset data is not a byte array');
+  }
+
+  _sendRequest(endpoint, payload) {
     return new Promise((resolve, reject) => {
       if (!this.connected) {
         reject(new Error('Not connected'));
         return;
       }
-      this._pending.push({ resolve, reject, wantBinary });
-      this.ws.send(JSON.stringify(obj));
+
+      this._pending.push({ resolve, reject });
+      this.ws.send(JSON.stringify({ endpoint, payload }));
     });
   }
 
   _onMessage(event) {
     if (event.data instanceof ArrayBuffer) {
-      // Binary frame — this is the asset data following a JSON header.
       const pending = this._pending.shift();
-      if (pending) {
-        pending.resolve(event.data);
-      }
-      this._binaryHeader = null;
+      if (pending) pending.reject(new Error('Unexpected binary response'));
       return;
     }
 
-    // Text frame — parse as JSON.
     let msg;
-    try { msg = JSON.parse(event.data); } catch { return; }
-
-    if (msg.action === 'error') {
-      const pending = this._pending.shift();
-      if (pending) pending.reject(new Error(msg.message));
+    try {
+      msg = JSON.parse(event.data);
+    } catch {
       return;
     }
 
-    if (msg.action === 'asset_data') {
-      // This is just the header before the binary frame — stash it and wait.
-      this._binaryHeader = msg;
-      return;
-    }
-
-    // Any other JSON response (e.g. asset_listing) resolves the pending request.
     const pending = this._pending.shift();
-    if (pending) pending.resolve(msg);
+    if (!pending) return;
+
+    if (msg && typeof msg.error === 'string' && msg.error.length) {
+      pending.reject(new Error(msg.error));
+      return;
+    }
+    pending.resolve(msg);
   }
 }

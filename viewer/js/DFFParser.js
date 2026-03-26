@@ -91,11 +91,12 @@ export class DFFParser {
       const rot = sr.readMat3();
       const pos = sr.readVec3();
       const parentIndex = sr.readInt32();
-      sr.readUInt32(); // flags
+      const frameFlags = sr.readUInt32();
       frames.push({
         rot,
         pos,
         parentIndex,
+        frameFlags,
         name: `bone_${i}`,
         nodeId: null,
         nodeIndex: -1,
@@ -531,11 +532,15 @@ export class DFFParser {
   _parseAtomic(r) {
     const struct = this._readChunk(r);
     const sr = struct.reader;
+    const frameIndex = sr.readUInt32();
+    const geometryIndex = sr.readUInt32();
+    const renderFlags = sr.remaining >= 4 ? sr.readUInt32() : 0x05;
+    const pipeline = sr.remaining >= 4 ? sr.readUInt32() : 0;
     return {
-      frameIndex:    sr.readUInt32(),
-      geometryIndex: sr.readUInt32(),
-      renderFlags:   sr.remaining >= 4 ? sr.readUInt32() : 0x05,
-      // flags (pipeline) — skip
+      frameIndex,
+      geometryIndex,
+      renderFlags,
+      pipeline,
     };
   }
 }

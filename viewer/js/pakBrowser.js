@@ -78,7 +78,7 @@ function getExt(filename) {
 }
 
 function formatSize(bytes) {
-  if (!bytes) return '';
+  if (!Number.isFinite(bytes) || bytes <= 0) return '';
   const units = ['B', 'KiB', 'MiB', 'GiB'];
   let v = bytes, u = 0;
   while (v >= 1024 && u < units.length - 1) { v /= 1024; u++; }
@@ -93,7 +93,14 @@ export function initPakTree(listing) {
   pakBufferCache.clear();
   pakInfoCache.clear();
 
-  const tree = buildTree(listing.data);
+  const assets = Array.isArray(listing?.assets)
+    ? listing.assets
+    : Array.isArray(listing?.data)
+      ? listing.data
+      : Array.isArray(listing)
+        ? listing
+        : [];
+  const tree = buildTree(assets);
   buildPakDirNode(ui.assetTree, tree, '', 0, true);
 }
 
@@ -148,6 +155,44 @@ function buildPakFolderBlock(path, dirs, files) {
   return section;
 }
 
+function formatPakBool(value) {
+  if (value === true) return 'Yes';
+  if (value === false) return 'No';
+  return 'Unknown';
+}
+
+function buildPakAssetMetaBlock(file) {
+  const hasMeta =
+    Number.isFinite(file?.timestamp) ||
+    typeof file?.are_data_embedded === 'boolean' ||
+    typeof file?.are_data_compressed === 'boolean';
+  if (!hasMeta) return null;
+
+  const section = document.createElement('section');
+  section.className = 'asset-detail-block';
+  const h3 = document.createElement('h3');
+  h3.className = 'asset-detail-title';
+  h3.textContent = 'PAK Entry';
+
+  const dl = document.createElement('dl');
+  dl.className = 'asset-kv';
+  const entries = [
+    ['Timestamp', Number.isFinite(file.timestamp) ? String(file.timestamp) : 'Unknown'],
+    ['Embedded', formatPakBool(file.are_data_embedded)],
+    ['Compressed', formatPakBool(file.are_data_compressed)],
+  ];
+  for (const [label, value] of entries) {
+    const dt = document.createElement('dt');
+    dt.textContent = label;
+    const dd = document.createElement('dd');
+    dd.textContent = value;
+    dl.append(dt, dd);
+  }
+
+  section.append(h3, dl);
+  return section;
+}
+
 function buildPakFileNode(parent, file, depth) {
   const ext = getExt(file.filename);
   const iconText = ext.toUpperCase().slice(0, 3) || 'BIN';
@@ -169,7 +214,10 @@ function buildPakFileNode(parent, file, depth) {
       const info = await getPakAssetInfo(fetchPath);
       if (token !== assetSelectionToken) return;
 
-      renderAssetDetail(buildFileDetailBlocks(info));
+      const blocks = buildFileDetailBlocks(info);
+      const metaBlock = buildPakAssetMetaBlock(file);
+      if (metaBlock) blocks.unshift(metaBlock);
+      renderAssetDetail(blocks);
 
       if (ext === 'dff') {
         await previewAssetInfo(info, token);

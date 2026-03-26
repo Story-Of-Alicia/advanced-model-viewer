@@ -90,8 +90,9 @@ export const state = {
   userLightViz:   null,
   // PAK state
   pakConnection:     null,    // PakConnection instance
+  pakResourcePath:   '',      // Active PAK resource path from the editor
   pakAssetIndex:     null,    // Map<normalised path, original PAK path>
-  pakListing:        null,    // raw listing.data array from server
+  pakListing:        null,    // raw listing.assets array from server
   // Map state
   mapMode:           false,
   mapGroup:          null,

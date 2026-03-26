@@ -15,8 +15,190 @@ async function getBuildMesh() {
   return _buildMesh;
 }
 
+function softenMapMeshGloss(mesh) {
+  const mats = Array.isArray(mesh?.material) ? mesh.material : [mesh?.material];
+  for (const mat of mats) {
+    if (!mat || !mat.isMeshPhongMaterial) continue;
+
+    const shininess = Number(mat.shininess ?? 0);
+    const hasSpecMap = !!mat.specularMap;
+    const specPeak = mat.specular ? Math.max(mat.specular.r, mat.specular.g, mat.specular.b) : 0;
+    const needsSoftening = hasSpecMap && shininess >= 30 && specPeak >= 0.30;
+    if (!needsSoftening) continue;
+
+    // Keep lighting response, but reduce specular peak and highlight size
+    // only for materials that are likely to over-gloss.
+    if (mat.specular) mat.specular.multiplyScalar(0.45);
+    mat.shininess = Math.min(shininess, 14);
+    mat.needsUpdate = true;
+  }
+}
+
+function buildFrameWorldMatrices(frames) {
+  if (!Array.isArray(frames) || frames.length === 0) return [];
+
+  const locals = frames.map((frame) => {
+    const rot = frame?.rot ?? [1,0,0,0,1,0,0,0,1];
+    const pos = frame?.pos ?? [0,0,0];
+    const [r0,r1,r2,r3,r4,r5,r6,r7,r8] = rot;
+    return new THREE.Matrix4().set(
+      r0, r3, r6, pos[0],
+      r1, r4, r7, pos[1],
+      r2, r5, r8, pos[2],
+      0,  0,  0,  1
+    );
+  });
+
+  const worlds = Array(frames.length);
+  for (let i = 0; i < frames.length; i++) {
+    let w = locals[i].clone();
+    let p = Number(frames[i]?.parentIndex ?? -1);
+    let guard = 0;
+    while (p >= 0 && p < frames.length && guard < frames.length + 1) {
+      w = locals[p].clone().multiply(w);
+      p = Number(frames[p]?.parentIndex ?? -1);
+      guard++;
+    }
+    worlds[i] = w;
+  }
+  return worlds;
+}
+
+const atomicFramePos = new THREE.Vector3();
+const atomicFrameQuat = new THREE.Quaternion();
+const atomicFrameScale = new THREE.Vector3();
+const atomicBoundsCenter = new THREE.Vector3();
+const atomicBoundsWork = new THREE.Vector3();
+
+function getGeometryBoundsCenterAndSize(geo, outCenter) {
+  const v = geo?.vertices;
+  if (!v || v.length < 3) {
+    outCenter.set(0, 0, 0);
+    return 0;
+  }
+
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < v.length; i += 3) {
+    const x = v[i], y = v[i + 1], z = v[i + 2];
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+  }
+
+  if (!Number.isFinite(minX) || !Number.isFinite(maxX)) {
+    outCenter.set(0, 0, 0);
+    return 0;
+  }
+
+  outCenter.set(
+    (minX + maxX) * 0.5,
+    (minY + maxY) * 0.5,
+    (minZ + maxZ) * 0.5
+  );
+  return Math.hypot(maxX - minX, maxY - minY, maxZ - minZ);
+}
+
+function computePointSpread(points) {
+  if (!Array.isArray(points) || points.length < 2) return 0;
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (const p of points) {
+    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) continue;
+    if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+    if (p.z < minZ) minZ = p.z; if (p.z > maxZ) maxZ = p.z;
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(maxX)) return 0;
+  return Math.hypot(maxX - minX, maxY - minY, maxZ - minZ);
+}
+
+function chooseAtomicFrameTransformMode(modelName, dffData, atomics, frameWorldMatrices) {
+  if (!Array.isArray(atomics) || atomics.length < 2) return 'rotation';
+
+  const centersNoFrame = [];
+  const centersWithFrame = [];
+  let sizeSum = 0;
+  let sizeCount = 0;
+  let preOffsetCount = 0;
+
+  for (const atomic of atomics) {
+    const geo = dffData?.geometries?.[atomic.geometryIndex];
+    const diag = getGeometryBoundsCenterAndSize(geo, atomicBoundsCenter);
+    const centerDist = atomicBoundsCenter.length();
+    centersNoFrame.push(atomicBoundsCenter.clone());
+
+    const frameMtx = frameWorldMatrices?.[atomic.frameIndex];
+    if (frameMtx) {
+      atomicBoundsWork.copy(atomicBoundsCenter).applyMatrix4(frameMtx);
+      centersWithFrame.push(atomicBoundsWork.clone());
+    } else {
+      centersWithFrame.push(atomicBoundsCenter.clone());
+    }
+
+    if (diag > 0.0001 && Number.isFinite(diag)) {
+      sizeSum += diag;
+      sizeCount++;
+      if (centerDist > Math.max(diag * 1.6, 0.80)) preOffsetCount++;
+    }
+  }
+
+  const avgAtomicSize = sizeCount > 0 ? (sizeSum / sizeCount) : 1.0;
+  const spreadNoFrame = computePointSpread(centersNoFrame);
+  const spreadWithFrame = computePointSpread(centersWithFrame);
+  const preOffsetMajority = preOffsetCount >= Math.max(2, Math.floor(atomics.length * 0.7));
+  // Most multipart props need frame translation. Only default to rotation-only
+  // when the majority of atomics look already pre-offset in geometry space.
+  const mode = preOffsetMajority ? 'rotation' : 'full';
+
+  if (Math.abs(spreadWithFrame - spreadNoFrame) > avgAtomicSize * 0.35) {
+    const pipeSet = [...new Set(atomics.map((a) => Number(a?.pipeline ?? 0)))].slice(0, 4);
+    const frameFlagSet = [...new Set(atomics.map((a) => Number(dffData?.frames?.[a?.frameIndex]?.frameFlags ?? 0)))].slice(0, 4);
+    console.log(
+      `[MAP atomic-xform] ${modelName}: mode=${mode} atoms=${atomics.length} ` +
+      `spread(noFrame)=${spreadNoFrame.toFixed(3)} spread(frame)=${spreadWithFrame.toFixed(3)} avgSize=${avgAtomicSize.toFixed(3)} ` +
+      `preOffset=${preOffsetCount}/${atomics.length} pipeline=[${pipeSet.join(',')}] frameFlags=[${frameFlagSet.join(',')}]`
+    );
+  }
+
+  return mode;
+}
+
+function shouldForceFullAtomicTransform(dffData, atomic, framePos, geoDiag, geoCenterDist) {
+  const frame = dffData?.frames?.[atomic?.frameIndex];
+  if (!frame || frame.parentIndex < 0) return false;
+
+  const frameDist = framePos.length();
+  if (!Number.isFinite(frameDist) || frameDist < 0.0001) return false;
+
+  const diag = Number.isFinite(geoDiag) ? geoDiag : 0;
+  const centerDist = Number.isFinite(geoCenterDist) ? geoCenterDist : 0;
+
+  // Typical "needs full frame offset" case:
+  // - geometry is authored near origin
+  // - frame carries a meaningful positional offset
+  // - using rotation-only would leave this part at/near ground origin
+  const hasMeaningfulFrameOffset = frameDist > Math.max(diag * 0.35, 0.20);
+  const geometryNearOrigin = centerDist < Math.max(diag * 0.75, frameDist * 0.60);
+  return hasMeaningfulFrameOffset && geometryNearOrigin;
+}
+
+function shouldUseRotationOnlyAtomicTransform(framePos, geoDiag, geoCenterDist) {
+  const frameDist = framePos.length();
+  if (!Number.isFinite(frameDist) || frameDist < 0.0001) return true;
+
+  const diag = Number.isFinite(geoDiag) ? geoDiag : 0;
+  const centerDist = Number.isFinite(geoCenterDist) ? geoCenterDist : 0;
+
+  // Geometry likely already carries positional offset, so applying frame translation
+  // would double-offset this atomic.
+  const geometryLikelyPreOffset = centerDist > Math.max(diag * 1.6, frameDist * 0.85, 0.80);
+  return geometryLikelyPreOffset;
+}
+
 // ─── BSP 4-layer terrain shader ──────────────────────────────────────────────
-function buildBSP4LayerMaterial(lightMap, t0, t1, t2, t3, layerScale, layerUV) {
+function buildBSP4LayerMaterial(lightMap, t0, t1, t2, t3, layerScale, layerUV, useAlphaComposite = true) {
   const makeGray = () => {
     const d = new Uint8Array([128, 128, 128, 255]);
     const tx = new THREE.DataTexture(d, 1, 1); tx.needsUpdate = true; return tx;
@@ -84,6 +266,7 @@ function buildBSP4LayerMaterial(lightMap, t0, t1, t2, t3, layerScale, layerUV) {
     uniform vec4 uLayerScale;
     uniform vec4 uLayerUV;
     uniform bool uUseLightMap;
+    uniform bool uUseAlphaComposite;
     varying vec2 vUv0;
     varying vec2 vTilingUV;
     varying vec2 vSecUV;
@@ -99,7 +282,9 @@ function buildBSP4LayerMaterial(lightMap, t0, t1, t2, t3, layerScale, layerUV) {
     varying vec2 vUV6;
 
     vec2 pickUV(float selector) {
-      return selector > 0.5 ? vSecUV : vTilingUV;
+      // c_layerUV is expected to be 0 (tiling) or 1 (secondary atlas UV).
+      // Treat unexpected values as tiling to avoid sampling the wrong UV set.
+      return (selector > 0.5 && selector < 1.5) ? vSecUV : vTilingUV;
     }
 
     vec4 pickZoneSample(vec4 blend, vec4 d0, vec4 d1, vec4 d2, vec4 d3) {
@@ -197,21 +382,22 @@ function buildBSP4LayerMaterial(lightMap, t0, t1, t2, t3, layerScale, layerUV) {
         col = vec4(clamp(vUV6.x, 0.0, 1.0), clamp(vUV6.y, 0.0, 1.0), 0.0, 1.0);
       } else {
         // 0: Normal rendering: smooth weighted blend with texture alpha compositing
-        float w0 = blend.r;
-        float w1 = blend.g;
-        float w2 = blend.b * d2.a;
-        float w3 = blend.a * d3.a;
-        float lost = blend.b * (1.0 - d2.a) + blend.a * (1.0 - d3.a);
-        w0 += lost * (1.0 - vT01);
-        w1 += lost * vT01;
-        float wTotal = w0 + w1 + w2 + w3;
-        if (wTotal < 0.001) wTotal = 1.0;
-        col = (d0 * w0 + d1 * w1 + d2 * w2 + d3 * w3) / wTotal;
-        col.a = 1.0;
-        if (uUseLightMap) {
-          vec3 lm = texture2D(lightMap, vUv0).rgb;
-          col.rgb *= lm * 2.5;
+        if (uUseAlphaComposite) {
+          float w0 = blend.r;
+          float w1 = blend.g;
+          float w2 = blend.b * d2.a;
+          float w3 = blend.a * d3.a;
+          float lost = blend.b * (1.0 - d2.a) + blend.a * (1.0 - d3.a);
+          w0 += lost * (1.0 - vT01);
+          w1 += lost * vT01;
+          float wTotal = w0 + w1 + w2 + w3;
+          if (wTotal < 0.001) wTotal = 1.0;
+          col = (d0 * w0 + d1 * w1 + d2 * w2 + d3 * w3) / wTotal;
+        } else {
+          // Fallback for maps where diffuse alpha is not reliable.
+          col = (d0*blend.r + d1*blend.g + d2*blend.b + d3*blend.a) / total;
         }
+        col.a = 1.0;
         if (uUseLightMap) {
           vec3 lm = texture2D(lightMap, vUv0).rgb;
           col.rgb *= lm * 2.5;
@@ -235,6 +421,7 @@ function buildBSP4LayerMaterial(lightMap, t0, t1, t2, t3, layerScale, layerUV) {
       uLayerScale: { value: new THREE.Vector4(...layerScale) },
       uLayerUV:    { value: new THREE.Vector4(...layerUV) },
       uUseLightMap:{ value: !!lightMap },
+      uUseAlphaComposite: { value: !!useAlphaComposite },
       uDebugMode:  { value: 0 },
     },
     vertexShader,
@@ -246,8 +433,9 @@ function buildBSP4LayerMaterial(lightMap, t0, t1, t2, t3, layerScale, layerUV) {
 }
 
 // ─── BSP world geometry renderer ─────────────────────────────────────────────
-async function buildBSPMesh(geoData, bspMaterials, texDir, resolvedTexOut = null) {
+async function buildBSPMesh(geoData, bspMaterials, texDir, resolvedTexOut = null, opts = {}) {
   const { vertices, normals, prelitColors, uvSets, matGroups } = geoData;
+  const useAlphaComposite = opts.useAlphaComposite ?? true;
   const numVerts = vertices.length / 3;
   const empty = new Float32Array(numVerts * 2);
   const uvLightmap = uvSets[1] ?? empty;
@@ -310,7 +498,7 @@ async function buildBSPMesh(geoData, bspMaterials, texDir, resolvedTexOut = null
     ]);
     console.log(`[BSP tex${matIdx}] loaded: t0=${t0?'OK':'FAIL'}(${bspMat?.c0}) t1=${t1?'OK':'FAIL'}(${bspMat?.c1}) t2=${t2?'OK':'FAIL'}(${bspMat?.c2}) t3=${t3?'OK':'FAIL'}(${bspMat?.c3}) lm=${lightMap?'OK':'FAIL'}`);
 
-    mats.push(buildBSP4LayerMaterial(lightMap, t0, t1, t2, t3, layerScale, layerUV));
+    mats.push(buildBSP4LayerMaterial(lightMap, t0, t1, t2, t3, layerScale, layerUV, useAlphaComposite));
   }
 
   bufGeo.setIndex(allIdx);
@@ -438,6 +626,9 @@ export async function loadMap(abinFile) {
   clearMap();
   setStatus('Loading map…');
   const mapDir = abinFile.replace(/\.abin$/i, '');
+  const mapBase = mapDir.split('/').pop();
+  // Use pure weight blending for all terrain maps while keeping per-layer UV selection.
+  const useTerrainAlphaComposite = false;
   const buildMesh = await getBuildMesh();
   try {
     const buf      = await fetchBinary(`${BASE}/${ABIN_DIR}/${abinFile}`);
@@ -470,6 +661,7 @@ export async function loadMap(abinFile) {
 
       try {
         const dffData = new DFFParser().parse(dffAsset.buffer);
+        const frameWorldMatrices = buildFrameWorldMatrices(dffData.frames ?? []);
         const resolvedDebug = { dffUrl: dffAsset.url, bspUrl: null, dffNames: [], bspNames: [] };
 
         let bspTextures = null;
@@ -490,13 +682,18 @@ export async function loadMap(abinFile) {
           }
         } catch { /* BSP optional */ }
 
-        const mapBase      = mapDir.split('/').pop();
         const isMapTerrain = model.name.toLowerCase() === mapBase.toLowerCase();
 
         let sceneObj;
         if (isMapTerrain && bspGeoData && bspTextures?.length) {
           console.log(`[BSP render] ${model.name}: ${bspGeoData.vertices.length/3} verts, ${bspGeoData.matGroups.size} groups, ${bspTextures.length} mats, uvSets=${bspGeoData.uvSets.length}`);
-          sceneObj = await buildBSPMesh(bspGeoData, bspTextures, getTexDir('bg-index'), resolvedDebug.bspNames);
+          sceneObj = await buildBSPMesh(
+            bspGeoData,
+            bspTextures,
+            getTexDir('bg-index'),
+            resolvedDebug.bspNames,
+            { useAlphaComposite: useTerrainAlphaComposite }
+          );
           state.mapGroup.add(sceneObj);
           li.className = 'terrain';
         } else {
@@ -504,11 +701,38 @@ export async function loadMap(abinFile) {
           group.position.set(model.position[0], model.position[1], model.position[2]);
           if (model.rotation) group.quaternion.set(model.rotation[0], model.rotation[1], model.rotation[2], model.rotation[3]);
           if (model.scale) group.scale.set(model.scale[0], model.scale[1], model.scale[2]);
-          for (const atomic of dffData.atomics) {
-            if (atomic.renderFlags !== 0 && (atomic.renderFlags & 0x04) === 0) continue;
+          const renderableAtomics = (dffData.atomics ?? []).filter((atomic) =>
+            atomic.renderFlags === 0 || (atomic.renderFlags & 0x04) !== 0
+          );
+          const atomicFrameMode = chooseAtomicFrameTransformMode(model.name, dffData, renderableAtomics, frameWorldMatrices);
+
+          for (const atomic of renderableAtomics) {
             const geo  = dffData.geometries[atomic.geometryIndex];
             const mesh = await buildMesh(geo, getTexDir('bg-index'), [], dffData.frames ?? [], null, false, bspTextures, resolvedDebug.dffNames);
             if (!mesh) continue;
+            softenMapMeshGloss(mesh);
+
+            const frameMtx = frameWorldMatrices[atomic.frameIndex];
+            if (frameMtx) {
+              const geoDiag = getGeometryBoundsCenterAndSize(geo, atomicBoundsCenter);
+              const geoCenterDist = atomicBoundsCenter.length();
+              frameMtx.decompose(atomicFramePos, atomicFrameQuat, atomicFrameScale);
+              let useFullAtomicTransform = atomicFrameMode === 'full';
+              if (useFullAtomicTransform) {
+                if (shouldUseRotationOnlyAtomicTransform(atomicFramePos, geoDiag, geoCenterDist)) {
+                  useFullAtomicTransform = false;
+                }
+              } else if (shouldForceFullAtomicTransform(dffData, atomic, atomicFramePos, geoDiag, geoCenterDist)) {
+                useFullAtomicTransform = true;
+              }
+
+              if (useFullAtomicTransform) {
+                mesh.position.copy(atomicFramePos);
+                mesh.quaternion.copy(atomicFrameQuat);
+              } else {
+                mesh.quaternion.copy(atomicFrameQuat);
+              }
+            }
             group.add(mesh);
           }
           state.mapGroup.add(group);

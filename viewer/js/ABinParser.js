@@ -115,6 +115,7 @@ export class ABinParser {
       r.readVec3();                // member42 boundMin
       r.readVec3();                // member43 boundMax
 
+      console.log(`[ABIN model] ${name} scale=[${scale.map(v=>v.toFixed(4))}] val=${val.toFixed(4)} pre=[${pre.map(v => {const f = new Float32Array(new Uint32Array([v]).buffer); return f[0].toFixed(4)}).join(',')}]`);
       models.push({ name, typeCode, position, rotation, flags, val, pre, post, member31, member37, scale });
     }
 
